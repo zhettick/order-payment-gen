@@ -1,0 +1,123 @@
+name: Generate ProtoBuf Files & Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Generator Repo
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.23
+
+      - name: Install Protobuf Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Go Protobuf Tools
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Clone Proto Files Repository
+        run: |
+          git clone https://github.com/zhettick/order-payment-protos.git
+
+      - name: Generate Go Code from Proto Files
+        run: |
+          cd order-payment-protos
+
+          echo "Directory structure:"
+          find . -type d
+
+          echo "Listing .proto files:"
+          find . -name "*.proto"
+
+          # Clean up previously generated files
+          rm -f order/v1/base/*.pb.go
+          rm -f order/v1/service/*.pb.go
+          rm -f payment/v1/base/*.pb.go
+          rm -f payment/v1/service/*.pb.go
+
+          # Generate .pb.go files (use source-relative paths!)
+          echo "Generating base files..."
+          protoc -I. \
+            --go_out=paths=source_relative:. \
+            order/v1/base/order.proto \
+            payment/v1/base/payment.proto
+
+          echo "Generating service files..."
+          protoc -I. \
+            --go_out=paths=source_relative:. \
+            --go-grpc_out=paths=source_relative:. \
+            order/v1/service/order.proto \
+            payment/v1/service/payment.proto
+
+          echo "Generated Go files:"
+          find . -name "*.pb.go"
+
+          # Ensure files were created
+          if [ -z "$(find . -name '*.pb.go')" ]; then
+            echo "Error: No .pb.go files generated."
+            exit 1
+          fi
+
+      - name: Push Generated Code to Gen Repo
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          cd order-payment-protos
+          git clone https://github.com/zhettick/order-payment-gen.git
+          
+          # Ensure the target directories exist
+          mkdir -p order-payment-gen/order/v1/base
+          mkdir -p order-payment-gen/order/v1/service
+          mkdir -p order-payment-gen/payment/v1/base
+          mkdir -p order-payment-gen/payment/v1/service
+          
+          # Clean out old generated Go files (not folders)
+          rm -f order-payment-gen/order/v1/base/*.pb.go
+          rm -f order-payment-gen/order/v1/service/*.pb.go
+          rm -f order-payment-gen/payment/v1/base/*.pb.go
+          rm -f order-payment-gen/payment/v1/service/*.pb.go
+          
+          # Copy generated files into the right folders
+          cp order/v1/base/*.pb.go order-payment-gen/order/v1/base/
+          cp order/v1/service/*.pb.go order-payment-gen/order/v1/service/
+          cp payment/v1/base/*.pb.go order-payment-gen/payment/v1/base/
+          cp payment/v1/service/*.pb.go order-payment-gen/payment/v1/service/
+          
+          cd order-payment-gen
+          
+          git config --global user.name "zhettick"
+          git config --global user.email "belikeotall@gmail.com"
+          
+          git add .
+          git add .
+          
+          if git diff --cached --quiet; then
+          echo "No changes to commit. Skipping commit and push."
+          else
+          git commit -m "Regenerate proto Go files"
+          
+          # Tag with timestamp-based version
+          NEW_TAG="v0.0.$(date +%s)"
+          git tag $NEW_TAG
+          
+          git remote set-url origin https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/zhettick/order-payment-gen.git
+          git push origin main --follow-tags
+          fi
